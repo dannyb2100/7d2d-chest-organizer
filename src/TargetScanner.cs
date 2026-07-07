@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using HarmonyLib;
 
 namespace CategorySorter
 {
@@ -11,6 +13,18 @@ namespace CategorySorter
     /// </summary>
     public static class TargetScanner
     {
+        private const ushort StorageLockChannel = 0;
+
+        private static readonly Type LockManagerType = AccessTools.TypeByName("LockManager");
+        private static readonly PropertyInfo LockManagerInstanceProperty =
+            LockManagerType != null ? AccessTools.Property(LockManagerType, "Instance") : null;
+        private static readonly MethodInfo LockManagerIsLockedServerMethod =
+            LockManagerType != null
+                ? AccessTools.Method(LockManagerType, "IsLockedServer", new[] { typeof(ILockTarget), typeof(ushort) })
+                : null;
+        private static readonly MethodInfo LegacyGetEntityIdForLockedTileEntityMethod =
+            AccessTools.Method(typeof(GameManager), "GetEntityIDForLockedTileEntity", new[] { typeof(TileEntity) });
+
         /// <summary>Ziel-TileEntities, nach Distanz zur Sortierkiste aufsteigend sortiert.</summary>
         public static List<TileEntity> GetPossibleTargets(Vector3i blockPos)
         {
@@ -60,8 +74,11 @@ namespace CategorySorter
             }
 
             // nicht in unberuehrte Loot-Container schieben (z. B. noch nicht gepluenderte Welt-Container)
-            if (entry.Value is TileEntityLootContainer lc && !lc.bTouched) return false;
-            if (entry.Value is TileEntitySecureLootContainer slc && !slc.bTouched) return false;
+            ITileEntityLootable lootable;
+            if (entry.Value.TryGetSelfOrFeature<ITileEntityLootable>(out lootable)
+                && !lootable.bPlayerStorage
+                && !lootable.bTouched)
+                return false;
 
             // zu weit entfernt
             if (distance > 0)
@@ -71,10 +88,51 @@ namespace CategorySorter
             }
 
             // gerade von einem Spieler geoeffnet
-            var anotherLockerId = GameManager.Instance.GetEntityIDForLockedTileEntity(entry.Value);
-            if (anotherLockerId != -1) return false;
+            if (IsLockedByPlayer(entry.Value)) return false;
 
             return true;
+        }
+
+        private static bool IsLockedByPlayer(TileEntity tileEntity)
+        {
+            if (tileEntity == null) return false;
+            if (IsLockedWithModernLockManager(tileEntity)) return true;
+            if (IsLockedWithLegacyGameManager(tileEntity)) return true;
+            return tileEntity.IsUserAccessing();
+        }
+
+        private static bool IsLockedWithModernLockManager(TileEntity tileEntity)
+        {
+            if (LockManagerInstanceProperty == null || LockManagerIsLockedServerMethod == null)
+                return false;
+
+            var target = tileEntity as ILockTarget;
+            if (target == null)
+            {
+                var composite = tileEntity as TileEntityComposite;
+                if (composite != null)
+                    target = composite.GetFeature<TEFeatureStorage>();
+            }
+
+            if (target == null) return false;
+
+            var manager = LockManagerInstanceProperty.GetValue(null, null);
+            if (manager == null) return false;
+
+            var result = LockManagerIsLockedServerMethod.Invoke(
+                manager,
+                new object[] { target, StorageLockChannel });
+            return result is bool && (bool)result;
+        }
+
+        private static bool IsLockedWithLegacyGameManager(TileEntity tileEntity)
+        {
+            if (LegacyGetEntityIdForLockedTileEntityMethod == null) return false;
+
+            var result = LegacyGetEntityIdForLockedTileEntityMethod.Invoke(
+                GameManager.Instance,
+                new object[] { tileEntity });
+            return result is int && (int)result != -1;
         }
     }
 }

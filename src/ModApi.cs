@@ -15,9 +15,12 @@ namespace CategorySorter
             Config.Load();
 
             var harmony = new Harmony("category.sorter.harmony");
-            harmony.PatchAll();
+            var patched = ChestClosePatches.Apply(harmony);
 
-            Log.Out("[" + ModName + "] initialized");
+            if (patched)
+                Log.Out("[" + ModName + "] initialized");
+            else
+                Log.Error("[" + ModName + "] initialized without a supported chest-close hook; sorting is disabled.");
         }
     }
 }
